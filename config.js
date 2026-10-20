@@ -7,5 +7,5 @@ window.BADMINTON_CONFIG = {
 
   // From OneSignal: Settings > Keys & IDs > App ID.
   // Leave it empty and the app still works, just without notifications.
-  oneSignalAppId: ''
+  oneSignalAppId: 'e6ea5d2f-8f04-4758-9288-cf8e5da74ce1'
 };
