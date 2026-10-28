@@ -62,5 +62,20 @@ body {
 .bm-btn:focus-visible { outline: 3px solid #93C5AE; outline-offset: 2px; }
 .bm-toast .bm-bar-body { color: #17201B; margin: 0; }
 
+/* "Updating…" label shown while saved sessions are on screen */
+.bm-pill {
+  position: fixed;
+  top: calc(8px + env(safe-area-inset-top, 0px));
+  right: 12px;
+  z-index: 45;
+  padding: 5px 11px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, .94);
+  color: #17201B;
+  box-shadow: 0 2px 8px rgba(23, 32, 27, .2);
+  font: 600 13px/1.2 Inter, system-ui, -apple-system, sans-serif;
+  pointer-events: none;
+}
+
 @keyframes bm-up { from { transform: translateY(16px); opacity: 0; } to { transform: none; opacity: 1; } }
 @media (prefers-reduced-motion: reduce) { .bm-bar { animation: none; } }

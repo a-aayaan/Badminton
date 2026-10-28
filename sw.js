@@ -8,7 +8,7 @@ try {
   // Offline or blocked: the app still works, just without notifications for now.
 }
 
-var CACHE = 'bm-shell-v1';
+var CACHE = 'bm-shell-v2';
 var SHELL = ['./', 'index.html', 'app.js', 'app.css', 'config.js', 'manifest.webmanifest',
   'icon-192.png', 'icon-512.png', 'icon-maskable-512.png', 'apple-touch-icon.png'];
 

@@ -10,12 +10,40 @@
   'use strict';
 
   var C = window.BADMINTON_CONFIG || {};
-  var PAGE_KEY = 'bm_page_v1';
-  var ACCENT = '#1E6B4F';
+  // Saved copies belong to one sheet link, so a different link never shows another version's page.
+  var SHEET_TAG = String(C.appsScriptUrl || '').replace(/^https?:\/\//, '').slice(-40);
+  var PAGE_KEY = 'bm_page_v2|' + SHEET_TAG;
+  var STATE_KEY = 'bm_state_v1|' + SHEET_TAG;
+  var FRESH_MS = 30000; // sessions saved this recently count as up to date
 
   function lsGet(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
   function lsSet(k, v) { try { if (v == null) localStorage.removeItem(k); else localStorage.setItem(k, v); } catch (e) {} }
   function abs(path) { return new URL(path, location.href).href; }
+  function meta(name, fallback) {
+    var m = document.querySelector('meta[name="' + name + '"]');
+    return (m && m.getAttribute('content')) || fallback;
+  }
+  // The name and colour come from index.html, so the test and live apps can differ
+  var APP_NAME = meta('apple-mobile-web-app-title', 'Badminton');
+  var THEME = meta('theme-color', '#1E6B4F');
+
+  // ---------- Saved sessions, so the page can show something straight away ----------
+  function saveState(state) {
+    if (!state || typeof state !== 'object') return;
+    try { lsSet(STATE_KEY, JSON.stringify({ at: Date.now(), state: state })); } catch (e) {}
+  }
+  function savedState() {
+    try {
+      var s = JSON.parse(lsGet(STATE_KEY) || 'null');
+      if (!s || !s.state) return null;
+      var st = JSON.parse(JSON.stringify(s.state));
+      // Move the page's clock on to now, so sessions that have since finished show as finished
+      if (typeof st.now === 'number') st.now += Date.now() - s.at;
+      return { age: Date.now() - s.at, state: st };
+    } catch (e) { return null; }
+  }
+  // Drop the saved copies left by the first version of the app
+  lsSet('bm_page_v1', null);
 
   // ---------- Talking to the sheet ----------
   function call(fn, args) {
@@ -63,7 +91,15 @@
     }
     function fetchPage() {
       splashMsg('Loading sign-ups…');
-      call('page').then(function (html) {
+      // One trip for the page and the sessions together.
+      // Falls back to the page alone if the sheet's App.gs is the older version.
+      call('boot').then(function (res) {
+        if (res && res.state) saveState(res.state);
+        return res && res.page;
+      }, function (err) {
+        if (/Unknown request/.test(String(err && err.message))) return call('page');
+        throw err;
+      }).then(function (html) {
         if (!html || typeof html !== 'string') throw new Error('No page came back.');
         lsSet(PAGE_KEY, html);
         show(html);
@@ -78,14 +114,17 @@
     else setTimeout(start, 0);
   }
 
+  function esc(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+  function escAttr(s) { return String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;'); }
+
   function headExtras() {
     return [
       '<meta name="bm-runtime" content="1">',
       '<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">',
-      '<meta name="theme-color" content="' + ACCENT + '">',
+      '<meta name="theme-color" content="' + escAttr(THEME) + '">',
       '<meta name="apple-mobile-web-app-capable" content="yes">',
       '<meta name="mobile-web-app-capable" content="yes">',
-      '<meta name="apple-mobile-web-app-title" content="Badminton">',
+      '<meta name="apple-mobile-web-app-title" content="' + escAttr(APP_NAME) + '">',
       '<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">',
       '<link rel="manifest" href="' + abs('manifest.webmanifest') + '">',
       '<link rel="apple-touch-icon" href="' + abs('apple-touch-icon.png') + '">',
@@ -123,6 +162,43 @@
   // on Google's own site. This stands in for it and sends the same calls
   // to the sheet over the web instead.
   function installGoogleShim() {
+    var firstLoad = true;
+
+    // Calls without an admin PIN return the same public view for everyone,
+    // so those are the only ones saved on the phone.
+    function isPublic(fn, args) {
+      if (fn === 'apiGetState') return !args[0];
+      if (fn === 'apiAction') return !(args[0] && args[0].pin);
+      return false;
+    }
+
+    function send(fn, args, ok, fail, userObj) {
+      // Opening the app: show the saved sessions straight away, then the latest ones.
+      if (fn === 'apiGetState' && firstLoad && isPublic(fn, args)) {
+        firstLoad = false;
+        var saved = savedState();
+        if (saved) {
+          setTimeout(function () { if (ok) ok(saved.state, userObj); }, 0);
+          if (saved.age < FRESH_MS) return; // just fetched with the page, already up to date
+          syncPill(true);
+          call(fn, args).then(function (res) {
+            syncPill(false);
+            saveState(res);
+            if (ok) ok(res, userObj);
+          }, function (err) {
+            syncPill(false);
+            if (fail) fail(err, userObj);
+          });
+          return;
+        }
+      }
+      if (fn === 'apiGetState') firstLoad = false;
+      call(fn, args).then(function (res) {
+        if (isPublic(fn, args)) saveState(fn === 'apiAction' ? res && res.state : res);
+        if (ok) ok(res, userObj);
+      }, function (err) { if (fail) fail(err, userObj); });
+    }
+
     function runner(ok, fail, userObj) {
       return new Proxy({}, {
         get: function (_, prop) {
@@ -131,11 +207,7 @@
           if (prop === 'withUserObject') return function (o) { return runner(ok, fail, o); };
           if (typeof prop !== 'string') return undefined;
           return function () {
-            var args = Array.prototype.slice.call(arguments);
-            call(prop, args).then(
-              function (res) { if (ok) ok(res, userObj); },
-              function (err) { if (fail) fail(err, userObj); }
-            );
+            send(prop, Array.prototype.slice.call(arguments), ok, fail, userObj);
           };
         }
       });
@@ -164,12 +236,28 @@
   }
 
   // Get the latest version of the page in the background, ready for next time.
+  // Waits a few seconds so it doesn't hold up the sessions loading.
   function refreshCachedPage() {
     setTimeout(function () {
       call('page').then(function (html) {
         if (html && typeof html === 'string' && html !== lsGet(PAGE_KEY)) lsSet(PAGE_KEY, html);
       }).catch(function () {});
-    }, 4000);
+    }, 8000);
+  }
+
+  // A small "Updating…" label while saved sessions are on screen
+  var pill = null, pillTimer = null;
+  function syncPill(on) {
+    clearTimeout(pillTimer);
+    if (!on) { if (pill && pill.parentNode) pill.parentNode.removeChild(pill); pill = null; return; }
+    pillTimer = setTimeout(function () { // only if it's taking a moment
+      if (pill || !document.body) return;
+      pill = document.createElement('div');
+      pill.className = 'bm-pill';
+      pill.setAttribute('role', 'status');
+      pill.textContent = 'Updating…';
+      document.body.appendChild(pill);
+    }, 400);
   }
 
   // ---------- Install prompts and notifications ----------
@@ -256,8 +344,8 @@
     shownThisVisit = true;
     var copy = {
       'notify': { icon: ICON_BELL, title: 'Get notified when you’re off a waitlist', body: 'We’ll also tell you when next month’s sessions open.', yes: 'Turn on', snooze: 'notify' },
-      'install': { icon: ICON_ADD, title: 'Add Badminton to your home screen', body: 'Opens full screen, like an app. Optional.', yes: 'Install', snooze: 'install' },
-      'install-ios': { icon: ICON_ADD, title: 'Add Badminton to your home screen', body: 'In Safari, tap ' + ICON_SHARE + ' Share, then <b>Add to Home Screen</b>. Optional' + (C.oneSignalAppId ? ', but it’s how you get notifications on iPhone.' : '.'), yes: '', snooze: 'install' }
+      'install': { icon: ICON_ADD, title: 'Add ' + esc(APP_NAME) + ' to your home screen', body: 'Opens full screen, like an app. Optional.', yes: 'Install', snooze: 'install' },
+      'install-ios': { icon: ICON_ADD, title: 'Add ' + esc(APP_NAME) + ' to your home screen', body: 'In Safari, tap ' + ICON_SHARE + ' Share, then <b>Add to Home Screen</b>. Optional' + (C.oneSignalAppId ? ', but it’s how you get notifications on iPhone.' : '.'), yes: '', snooze: 'install' }
     }[which];
 
     bar = document.createElement('div');
